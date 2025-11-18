@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Download</title>
+</head>
+<body>
+    <h1>Test de Descarga</h1>
+    <button onclick="testDownload()">Probar Descarga</button>
+    <div id="result"></div>
+
+    <script>
+        const API_URL = 'http://localhost:3000/api';
+
+        async function testDownload() {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '<p>Iniciando prueba...</p>';
+
+            try {
+                // 1. Login
+                const loginResponse = await fetch(`${API_URL}/auth/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        email: 'test@example.com',
+                        password: '123456'
+                    })
+                });
+
+                if (!loginResponse.ok) {
+                    throw new Error('Error en login');
+                }
+
+                const loginData = await loginResponse.json();
+                const token = loginData.token;
+                localStorage.setItem('token', token);
+                resultDiv.innerHTML += '<p>✅ Login exitoso</p>';
+
+                // 2. Obtener archivos
+                const filesResponse = await fetch(`${API_URL}/files/my-files`, {
+                    headers: {
+                        'x-auth-token': token
+                    }
+                });
+
+                if (!filesResponse.ok) {
+                    throw new Error('Error al obtener archivos');
+                }
+
+                const files = await filesResponse.json();
+                resultDiv.innerHTML += `<p>✅ Se encontraron ${files.length} archivos</p>`;
+
+                if (files.length > 0) {
+                    const firstFile = files[0];
+                    resultDiv.innerHTML += `<p>Probando descarga de: ${firstFile.originalname || firstFile.name}</p>`;
+                    
+                    // 3. Descargar archivo
+                    const downloadResponse = await fetch(`${API_URL}/files/download/${firstFile.id}`, {
+                        headers: {
+                            'x-auth-token': token
+                        }
+                    });
+
+                    if (!downloadResponse.ok) {
+                        throw new Error(`Error en descarga: ${downloadResponse.status}`);
+                    }
+
+                    const blob = await downloadResponse.blob();
+                    const blobUrl = window.URL.createObjectURL(blob);
+                    
+                    const downloadLink = document.createElement('a');
+                    downloadLink.href = blobUrl;
+                    downloadLink.setAttribute('download', firstFile.originalname || 'archivo');
+                    
+                    document.body.appendChild(downloadLink);
+                    downloadLink.click();
+                    
+                    setTimeout(() => {
+                        document.body.removeChild(downloadLink);
+                        window.URL.revokeObjectURL(blobUrl);
+                    }, 100);
+                    
+                    resultDiv.innerHTML += '<p>✅ Descarga iniciada!</p>';
+                }
+
+            } catch (error) {
+                console.error('Error:', error);
+                resultDiv.innerHTML += `<p>❌ Error: ${error.message}</p>`;
+            }
+        }
+    </script>
+</body>
+</html>

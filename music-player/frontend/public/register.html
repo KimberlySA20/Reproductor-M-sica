@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Registro - Reproductor de Música</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin: 0;
+            color: #333;
+        }
+        .register-container {
+            background: white;
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+            width: 100%;
+            max-width: 400px;
+        }
+        .register-header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+        .register-header h1 {
+            color: #2a5298;
+            margin: 0 0 0.5rem 0;
+        }
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: bold;
+        }
+        .form-group input {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 1rem;
+            box-sizing: border-box;
+        }
+        .form-group input:focus {
+            outline: none;
+            border-color: #2a5298;
+            box-shadow: 0 0 0 2px rgba(42, 82, 152, 0.2);
+        }
+        .btn {
+            width: 100%;
+            padding: 0.75rem;
+            background-color: #2a5298;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .btn:hover {
+            background-color: #1e3c72;
+        }
+        .form-footer {
+            text-align: center;
+            margin-top: 1.5rem;
+        }
+        .form-footer a {
+            color: #2a5298;
+            text-decoration: none;
+        }
+        .form-footer a:hover {
+            text-decoration: underline;
+        }
+        .error-message {
+            color: #e74c3c;
+            text-align: center;
+            margin-bottom: 1rem;
+        }
+        .success-message {
+            color: #27ae60;
+            text-align: center;
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="register-container">
+        <div class="register-header">
+            <h1>Crear Cuenta</h1>
+            <p>Regístrate para comenzar a disfrutar de la música</p>
+        </div>
+        <form id="registerForm">
+            <div id="errorMessage" class="error-message"></div>
+            <div id="successMessage" class="success-message"></div>
+            <div class="form-group">
+                <label for="email">Correo electrónico</label>
+                <input type="email" id="email" name="email" required>
+            </div>
+            <div class="form-group">
+                <label for="password">Contraseña</label>
+                <input type="password" id="password" name="password" minlength="6" required>
+            </div>
+            <div class="form-group">
+                <label for="confirmPassword">Confirmar Contraseña</label>
+                <input type="password" id="confirmPassword" name="confirmPassword" minlength="6" required>
+            </div>
+            <button type="submit" class="btn">Registrarse</button>
+        </form>
+        <div class="form-footer">
+            <p>¿Ya tienes una cuenta? <a href="login.html">Inicia sesión aquí</a></p>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('registerForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            const confirmPassword = document.getElementById('confirmPassword').value;
+            const errorElement = document.getElementById('errorMessage');
+            const successElement = document.getElementById('successMessage');
+            
+            // Validar que las contraseñas coincidan
+            if (password !== confirmPassword) {
+                errorElement.textContent = 'Las contraseñas no coinciden';
+                return;
+            }
+            
+            try {
+                const response = await fetch('http://localhost:3000/api/auth/register', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ email, password }),
+                    credentials: 'include'
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.msg || 'Error al registrar el usuario');
+                }
+                
+                // Mostrar mensaje de éxito
+                errorElement.textContent = '';
+                successElement.textContent = '¡Registro exitoso! Redirigiendo...';
+                
+                // Redirigir al login después de 2 segundos
+                setTimeout(() => {
+                    window.location.href = 'login.html';
+                }, 2000);
+                
+            } catch (error) {
+                errorElement.textContent = error.message;
+                successElement.textContent = '';
+            }
+        });
+    </script>
+</body>
+</html>
