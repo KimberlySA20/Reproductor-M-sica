@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nube y Conversión - Reproductor de Música</title>
+    <link rel="stylesheet" href="/styles.css">
+    <link href="https://fonts.googleapis.com/icon?family=Material-icons" rel="stylesheet">
+    <style>
+        .cloud-container {
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 20px;
+        }
+        .tabs {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #333;
+        }
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border: 1px solid transparent;
+            border-bottom: none;
+            margin-right: 5px;
+            border-radius: 5px 5px 0 0;
+        }
+        .tab.active {
+            background-color: #1DB954;
+            color: white;
+        }
+        .tab-content {
+            display: none;
+            padding: 20px;
+            border: 1px solid #333;
+            border-top: none;
+            border-radius: 0 0 5px 5px;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        .file-list {
+            margin-top: 20px;
+        }
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px;
+            border-bottom: 1px solid #333;
+            align-items: center;
+        }
+        .file-actions {
+            display: flex;
+            gap: 10px;
+        }
+        .conversion-options {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #1e1e1e;
+            border-radius: 5px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        .form-group select, .form-group input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #333;
+            background-color: #2d2d2d;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-content">
+                <h1>Nube y Conversión</h1>
+                <div class="header-actions">
+                    <a href="/index.html" class="btn">
+                        <i class="material-icons">home</i> Inicio
+                    </a>
+                    <button id="logoutBtn" class="btn btn-logout">
+                        <i class="material-icons">logout</i> Cerrar Sesión
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <div class="cloud-container">
+            <div class="tabs">
+                <div class="tab active" data-tab="upload">Subir Archivos</div>
+                <div class="tab" data-tab="files">Mis Archivos</div>
+                <div class="tab" data-tab="converted">Archivos Convertidos</div>
+                <div class="tab" data-tab="shared">Compartidos</div>
+            </div>
+
+            <!-- Pestaña de Subida -->
+            <div id="upload-tab" class="tab-content active">
+                <div class="upload-area" id="dropZone">
+                    <input type="file" id="fileInput" multiple style="display: none;">
+                    <button id="selectFilesBtn" class="btn">
+                        <i class="material-icons">cloud_upload</i> Seleccionar Archivos
+                    </button>
+                    <p>o arrastra y suelta archivos aquí</p>
+                    <div id="fileList" class="file-list"></div>
+                </div>
+                
+                <div class="conversion-options">
+                    <h3>Opciones de Conversión</h3>
+                    <div class="form-group">
+                        <label for="convertTo">Convertir a:</label>
+                        <select id="convertTo">
+                            <option value="none">Sin conversión</option>
+                            <option value="mp3">MP3 (Calidad estándar)</option>
+                            <option value="aac">AAC (Mejor calidad)</option>
+                            <option value="ogg">OGG (Tamaño reducido)</option>
+                            <option value="wav">WAV (Máxima calidad)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="quality">Calidad:</label>
+                        <select id="quality">
+                            <option value="high">Alta (mejor calidad)</option>
+                            <option value="medium" selected>Media (equilibrado)</option>
+                            <option value="low">Baja (más pequeño)</option>
+                        </select>
+                    </div>
+                    <button id="startUploadBtn" class="btn" disabled>
+                        <i class="material-icons">cloud_upload</i> Iniciar Subida
+                    </button>
+                </div>
+            </div>
+
+            <!-- Pestaña de Mis Archivos -->
+            <div id="files-tab" class="tab-content">
+                <div class="file-actions">
+                    <button id="refreshFilesBtn" class="btn">
+                        <i class="material-icons">refresh</i> Actualizar
+                    </button>
+                </div>
+                <div id="userFilesList" class="file-list">
+                    <!-- Los archivos se cargarán aquí dinámicamente -->
+                </div>
+            </div>
+
+            <!-- Pestaña de Archivos Convertidos -->
+            <div id="converted-tab" class="tab-content">
+                <div class="file-actions">
+                    <button id="refreshConvertedBtn" class="btn">
+                        <i class="material-icons">refresh</i> Actualizar
+                    </button>
+                </div>
+                <div id="convertedFilesList" class="file-list">
+                    <!-- Los archivos convertidos se cargarán aquí dinámicamente -->
+                </div>
+            </div>
+
+            <!-- Pestaña de Archivos Compartidos -->
+            <div id="shared-tab" class="tab-content">
+                <div id="sharedFilesList" class="file-list">
+                    <!-- Los archivos compartidos se cargarán aquí dinámicamente -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/js/cloud.js"></script>
+</body>
+</html>

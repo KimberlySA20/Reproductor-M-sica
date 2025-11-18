@@ -1,0 +1,652 @@
+const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+const ffmpeg = require('fluent-ffmpeg');
+const ffmpegPath = require('ffmpeg-static');
+const fs = require('fs');
+const path = require('path');
+const { v4: uuidv4 } = require('uuid');
+const mongoose = require('mongoose');
+const axios = require('axios');
+
+// Configure ffmpeg path
+ffmpeg.setFfmpegPath(ffmpegPath);
+
+// Configuration
+const PORT = process.env.PORT || 3001;
+const MASTER_NODE_URL = process.env.MASTER_NODE_URL || 'http://localhost:3000';
+const NODE_ID = process.env.NODE_ID || `node-${uuidv4()}`;
+const HEARTBEAT_INTERVAL = 5000; // 5 segundos entre heartbeats
+
+// Initialize Express app
+const app = express();
+const server = http.createServer(app);
+// Configuración CORS para Express
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', 'http://localhost:3000');
+    res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Range');
+    res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(200);
+    }
+    next();
+});
+
+const io = socketIo(server, {
+    cors: {
+        origin: "http://localhost:3000",
+        methods: ["GET", "POST"],
+        credentials: true
+    }
+});
+
+// Middleware
+app.use(express.json());
+app.use(express.static('public'));
+
+// Connect to MongoDB
+mongoose.connect('mongodb://admin:password123@localhost:27017/musicdb?authSource=admin', {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+}).then(() => {
+    console.log('Worker connected to MongoDB');}).catch(err => {
+    console.error('MongoDB connection error:', err);
+    process.exit(1);
+});
+
+// Song Schema
+const songSchema = new mongoose.Schema({
+    title: { type: String, required: true },
+    artist: { type: String, required: true },
+    filePath: { type: String, required: true },
+    duration: { type: Number, required: true },
+    uploadDate: { type: Date, default: Date.now }
+});
+
+const Song = mongoose.model('Song', songSchema);
+
+// Worker state
+const workerState = {
+    id: NODE_ID,
+    status: 'idle', // 'idle', 'processing', 'error'
+    currentTask: null,
+    load: 0, // 0-100 representing current load
+    lastHeartbeat: new Date(),
+    capabilities: ['audio_playback', 'audio_processing']
+};
+
+// Track active streams
+const activeStreams = new Map();
+
+// Register with master node
+async function registerWithMaster(retryCount = 0) {
+    const maxRetries = 5;
+    const retryDelay = 5000; // 5 seconds
+    
+    try {
+        console.log(`[${new Date().toISOString()}] Attempting to register with master at ${MASTER_NODE_URL}... (Attempt ${retryCount + 1}/${maxRetries})`);
+        
+        const response = await axios.post(
+            `${MASTER_NODE_URL}/api/workers/register`,
+            {
+                workerId: NODE_ID,
+                port: PORT,
+                capabilities: ['audio/streaming', 'audio_processing'],
+                status: 'idle',
+                load: 0
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Worker-Id': NODE_ID,
+                    'X-Worker-Version': '1.0.0'
+                },
+                timeout: 10000, // 10 seconds timeout
+                maxRedirects: 2,
+                validateStatus: (status) => status >= 200 && status < 500
+            }
+        );
+        
+        if (response.data && response.data.status === 'ok') {
+            console.log(`[${new Date().toISOString()}] Successfully registered with master node`);
+            return true;
+        } else {
+            const errorMsg = response.data?.message || 'Invalid response from master';
+            throw new Error(`Registration failed: ${errorMsg}`);
+        }
+    } catch (error) {
+        console.error('Failed to register with master node:', error.message);
+        if (error.response) {
+            console.error('Response data:', error.response.data);
+            console.error('Response status:', error.response.status);
+            console.error('Response headers:', error.response.headers);
+        } else if (error.request) {
+            console.error('No response received:', error.request);
+        } else {
+            console.error('Error details:', error.message);
+        }
+        
+        // Retry logic
+        if (retryCount < maxRetries - 1) {
+            console.log(`Retrying in ${retryDelay / 1000} seconds...`);
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+            return registerWithMaster(retryCount + 1);
+        }
+        
+        console.error('Max retries reached. Giving up on registration.');
+        return false;
+    }
+}
+
+// Send heartbeat to master node
+async function sendHeartbeat() {
+    try {
+        // Update worker state
+        workerState.lastHeartbeat = new Date();
+        workerState.load = calculateCurrentLoad();
+        
+        // Send heartbeat to master
+        const response = await axios.post(
+            `${MASTER_NODE_URL}/api/workers/heartbeat`,
+            {
+                workerId: NODE_ID,
+                status: workerState.status,
+                load: workerState.load,
+                capabilities: workerState.capabilities,
+            currentTask: workerState.currentTask
+        }, {
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            timeout: 3000 // 3 segundos de timeout
+        });
+        
+        // Si el estado era 'starting', cambiarlo a 'idle' después del primer heartbeat exitoso
+        if (workerState.status === 'starting') {
+            workerState.status = 'idle';
+            console.log('Worker is now idle and ready to accept tasks');
+        }
+        
+        // Verificar si el servidor nos pide que nos registremos de nuevo
+        if (response.data && response.data.reregister) {
+            console.log('Master requested re-registration, re-registering...');
+            await registerWithMaster();
+        }
+    } catch (error) {
+        console.error('Error sending heartbeat:', error.message);
+        
+        // Manejar diferentes tipos de errores
+        if (error.response) {
+            // El servidor respondió con un código de estado fuera del rango 2xx
+            console.error('Heartbeat failed with status:', error.response.status);
+            console.error('Response data:', error.response.data);
+            
+            // Si el worker no está registrado (404), intentar registrarse de nuevo
+            if (error.response.status === 404) {
+                console.log('Worker not registered or session expired, attempting to re-register...');
+                await registerWithMaster();
+            }
+        } else if (error.request) {
+            // La solicitud fue hecha pero no se recibió respuesta
+            console.error('No response received from master node. Is it running?');
+        } else {
+            // Algo más falló al configurar la solicitud
+            console.error('Error setting up heartbeat request:', error.message);
+        }
+    } finally {
+        // Programar el próximo heartbeat
+        setTimeout(sendHeartbeat, HEARTBEAT_INTERVAL);
+    }
+}
+
+// Calculate current load (simplified)
+function calculateCurrentLoad() {
+    // In a real app, this would consider CPU, memory, and active streams
+    const baseLoad = activeStreams.size * 10; // 10% per stream
+    return Math.min(baseLoad, 90); // Cap at 90%
+}
+
+// Función para convertir audio a formato estándar
+async function convertAudio(inputPath, outputPath) {
+    return new Promise((resolve, reject) => {
+        console.log(`Iniciando conversión de ${inputPath} a ${outputPath}`);
+        
+        ffmpeg(inputPath)
+            .audioCodec('libmp3lame')  // Usar codec MP3
+            .audioBitrate(192)         // 192 kbps de calidad
+            .audioChannels(2)          // Estéreo
+            .audioFrequency(44100)     // 44.1kHz, calidad CD
+            .format('mp3')             // Formato de salida
+            .on('progress', (progress) => {
+                console.log(`Progreso de conversión: ${Math.round(progress.percent)}%`);
+            })
+            .on('end', () => {
+                console.log('Conversión completada con éxito');
+                resolve(outputPath);
+            })
+            .on('error', (err) => {
+                console.error('Error en la conversión:', err);
+                reject(err);
+            })
+            .save(outputPath);
+    });
+}
+
+// Ruta para streaming de audio
+app.get('/stream/:songId', async (req, res) => {
+    try {
+        const { songId } = req.params;
+        const range = req.headers.range;
+        
+        if (!range) {
+            return res.status(400).send('Requiere encabezado Range');
+        }
+        
+        // Buscar la canción en la base de datos
+        const song = await Song.findById(songId);
+        if (!song) {
+            console.error('Canción no encontrada en la base de datos');
+            return res.status(404).json({ error: 'Canción no encontrada' });
+        }
+        
+        // Construir rutas de archivos
+        const inputPath = path.join(__dirname, '..', song.filePath);
+        const outputDir = path.join(__dirname, '..', 'converted');
+        const outputPath = path.join(outputDir, `${songId}.mp3`);
+        
+        // Crear directorio de conversión si no existe
+        if (!fs.existsSync(outputDir)) {
+            fs.mkdirSync(outputDir, { recursive: true });
+        }
+        
+        // Verificar si el archivo de origen existe
+        if (!fs.existsSync(inputPath)) {
+            console.error(`Archivo de audio no encontrado: ${inputPath}`);
+            return res.status(404).json({ error: 'Archivo de audio no encontrado' });
+        }
+        
+        // Convertir el archivo si no existe la versión convertida
+        if (!fs.existsSync(outputPath)) {
+            try {
+                workerState.status = 'converting';
+                workerState.currentTask = `Convirtiendo ${song.title} a MP3`;
+                await convertAudio(inputPath, outputPath);
+            } catch (error) {
+                console.error('Error al convertir el audio:', error);
+                return res.status(500).json({ error: 'Error al procesar el audio' });
+            }
+        }
+        
+        // Obtener información del archivo convertido
+        const audioSize = fs.statSync(outputPath).size;
+        
+        // Parsear el rango solicitado
+        const CHUNK_SIZE = 10 ** 6; // 1MB
+        const start = Number(range.replace(/\D/g, ""));
+        const end = Math.min(start + CHUNK_SIZE, audioSize - 1);
+        
+        // Encabezados de respuesta
+        const contentLength = end - start + 1;
+        const headers = {
+            'Content-Range': `bytes ${start}-${end}/${audioSize}`,
+            'Accept-Ranges': 'bytes',
+            'Content-Length': contentLength,
+            'Content-Type': 'audio/mp3',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*'
+        };
+        
+        console.log(`Sirviendo canción: ${song.title} (${start}-${end}/${audioSize})`);
+        
+        // Enviar la respuesta con el chunk de audio
+        res.writeHead(206, headers);
+        
+        const audioStream = fs.createReadStream(outputPath, { start, end });
+        
+        // Actualizar el estado del worker
+        workerState.status = 'streaming';
+        workerState.currentTask = `Transmitiendo ${song.title}`;
+        
+        // Manejar eventos del stream
+        audioStream.on('open', () => {
+            audioStream.pipe(res);
+        });
+        
+        audioStream.on('end', () => {
+            workerState.status = 'idle';
+            workerState.currentTask = null;
+            console.log(`Transmisión finalizada: ${song.title}`);
+        });
+        
+        audioStream.on('error', (error) => {
+            console.error('Error en transmisión de audio:', error);
+            workerState.status = 'error';
+            workerState.currentTask = `Error transmitiendo ${song.title}`;
+            if (!res.headersSent) {
+                res.status(500).json({ error: 'Error al transmitir el audio' });
+            }
+        });
+        
+        // Manejar cierre de conexión
+        res.on('close', () => {
+            audioStream.destroy();
+            workerState.status = 'idle';
+            workerState.currentTask = null;
+        });
+        
+    } catch (error) {
+        console.error('Error en el endpoint de streaming:', error);
+        workerState.status = 'error';
+        workerState.currentTask = 'Error en el servidor';
+        
+        if (!res.headersSent) {
+            res.status(500).json({ 
+                error: 'Error interno del servidor',
+                message: error.message 
+            });
+        }
+    }
+});
+            };
+
+            res.writeHead(206, head);
+            file.pipe(res);
+        } else {
+            // Si no hay rango, enviar todo el archivo
+            console.log('Enviando archivo completo');
+            const head = {
+                'Content-Length': fileSize,
+                'Content-Type': 'audio/mpeg',
+            };
+            res.writeHead(200, head);
+            fs.createReadStream(filePath).pipe(res);
+        }
+    } catch (error) {
+        console.error('Error en el stream de audio:', error);
+        res.status(500).send('Error al procesar la solicitud de audio');
+    }
+});
+
+// Handle incoming WebSocket connections
+io.on('connection', (socket) => {
+    console.log('Client connected:', socket.id);
+    
+    // Handle stream requests
+    socket.on('stream-request', async (data, callback) => {
+        try {
+            const { songId, startTime = 0 } = data;
+            
+            // Get song from database
+            const song = await Song.findById(songId);
+            if (!song) {
+                throw new Error('Song not found');
+            }
+            
+            // Create a unique stream ID
+            const streamId = `stream-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+            
+            // Store stream info
+            const streamInfo = {
+                id: streamId,
+                songId: song._id,
+                socketId: socket.id,
+                startTime: startTime,
+                createdAt: new Date()
+            };
+            
+            activeStreams.set(streamId, streamInfo);
+            
+            // Start streaming the audio
+            streamAudio(socket, streamId, song, startTime);
+            
+            // Send success response
+            callback({
+                success: true,
+                streamId,
+                song: {
+                    id: song._id,
+                    title: song.title,
+                    artist: song.artist,
+                    duration: song.duration
+                }
+            });
+            
+            // Update worker state
+            workerState.status = 'processing';
+            workerState.currentTask = `Streaming ${song.title}`;
+            
+        } catch (error) {
+            console.error('Stream request error:', error);
+            callback({
+                success: false,
+                error: error.message
+            });
+        }
+    });
+    
+    // Handle stream control
+    socket.on('stream-control', (data) => {
+        const { streamId, action, payload } = data;
+        const streamInfo = activeStreams.get(streamId);
+        
+        if (!streamInfo) {
+            console.error('Stream not found:', streamId);
+            return;
+        }
+        
+        // Forward control to the appropriate stream handler
+        socket.emit(`stream-${streamId}-control`, { action, payload });
+    });
+    
+    // Handle disconnection
+    socket.on('disconnect', () => {
+        console.log('Client disconnected:', socket.id);
+        
+        // Clean up any active streams for this socket
+        for (const [streamId, streamInfo] of activeStreams.entries()) {
+            if (streamInfo.socketId === socket.id) {
+                activeStreams.delete(streamId);
+                console.log(`Cleaned up stream ${streamId} for disconnected client`);
+            }
+        }
+        
+        // Update worker state if no more active streams
+        if (activeStreams.size === 0) {
+            workerState.status = 'idle';
+            workerState.currentTask = null;
+        }
+    });
+});
+
+// Stream audio to client
+function streamAudio(socket, streamId, song, startTime) {
+    const filePath = path.join(__dirname, '..', 'frontend', 'public', song.filePath);
+    
+    if (!fs.existsSync(filePath)) {
+        console.error('Audio file not found:', filePath);
+        socket.emit('stream-error', {
+            streamId,
+            error: 'Audio file not found'
+        });
+        return;
+    }
+    
+    console.log(`Starting stream ${streamId} for ${song.title} from ${startTime}s`);
+    
+    // Create a transform stream to handle the audio data
+    const command = ffmpeg(filePath)
+        .seekInput(startTime)
+        .audioCodec('libmp3lame')
+        .audioBitrate(128)
+        .format('mp3')
+        .on('error', (err) => {
+            console.error('FFmpeg error:', err);
+            socket.emit('stream-error', {
+                streamId,
+                error: err.message
+            });
+            activeStreams.delete(streamId);
+        })
+        .on('end', () => {
+            console.log(`Stream ${streamId} ended`);
+            socket.emit('stream-end', { streamId });
+            activeStreams.delete(streamId);
+            
+            // Update worker state if no more active streams
+            if (activeStreams.size === 0) {
+                workerState.status = 'idle';
+                workerState.currentTask = null;
+            }
+        });
+    
+    // Pipe the audio data to the client
+    const audioStream = command.pipe();
+    
+    // Handle stream data
+    audioStream.on('data', (chunk) => {
+        socket.emit('stream-data', {
+            streamId,
+            data: chunk
+        });
+    });
+    
+    // Handle stream control
+    const controlListener = (data) => {
+        if (data.action === 'pause') {
+            // In a real implementation, we would pause the stream
+            console.log(`Pausing stream ${streamId}`);
+        } else if (data.action === 'resume') {
+            // In a real implementation, we would resume the stream
+            console.log(`Resuming stream ${streamId}`);
+        } else if (data.action === 'seek') {
+            // In a real implementation, we would seek the stream
+            console.log(`Seeking stream ${streamId} to ${data.payload.time}s`);
+        }
+    };
+    
+    socket.on(`stream-${streamId}-control`, controlListener);
+    
+    // Clean up on client disconnect
+    const cleanup = () => {
+        socket.off(`stream-${streamId}-control`, controlListener);
+        socket.off('disconnect', cleanup);
+        
+        // Kill the ffmpeg process
+        command.kill('SIGKILL');
+        
+        // Remove from active streams
+        activeStreams.delete(streamId);
+        
+        console.log(`Cleaned up stream ${streamId}`);
+    };
+    
+    socket.once('disconnect', cleanup);
+}
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        workerId: NODE_ID,
+        status: workerState.status,
+        load: workerState.load,
+        activeStreams: activeStreams.size,
+        lastHeartbeat: workerState.lastHeartbeat,
+        uptime: process.uptime()
+    });
+});
+
+// Start the worker
+async function startWorker() {
+    console.log(`Starting worker ${NODE_ID}...`);
+    
+    // Configurar manejadores de señales para un cierre limpio
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+    
+    // Función para apagar el worker de manera limpia
+    async function shutdown() {
+        console.log('Shutting down worker node...');
+        try {
+            // Notificar al master que el worker se está apagando
+            if (server) {
+                await new Promise(resolve => server.close(resolve));
+                console.log('HTTP server closed');
+            }
+            
+            // Cerrar conexión a MongoDB
+            if (mongoose.connection.readyState === 1) {
+                await mongoose.connection.close();
+                console.log('MongoDB connection closed');
+            }
+            
+            console.log('Worker shutdown complete');
+            process.exit(0);
+        } catch (error) {
+            console.error('Error during shutdown:', error);
+            process.exit(1);
+        }
+    }
+    
+    try {
+        // Inicializar el estado del worker
+        workerState.status = 'starting';
+        workerState.startTime = new Date();
+        
+        // Iniciar el servidor HTTP en todas las interfaces
+        const server = http.createServer(app).listen(PORT, '0.0.0.0', async () => {
+            console.log(`Worker node ${NODE_ID} running on port ${PORT}`);
+            
+            // Intentar registrar el worker con el servidor maestro
+            let attempts = 0;
+            const maxAttempts = 5;
+            let registered = false;
+            
+            while (!registered && attempts < maxAttempts) {
+                attempts++;
+                console.log(`Registration attempt ${attempts} of ${maxAttempts}...`);
+                registered = await registerWithMaster();
+                
+                if (!registered) {
+                    if (attempts < maxAttempts) {
+                        console.log(`Retrying in 3 seconds... (${maxAttempts - attempts} attempts remaining)`);
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                    }
+                }
+            }
+            
+            if (!registered) {
+                console.error(`Failed to register with master after ${maxAttempts} attempts. Exiting.`);
+                process.exit(1);
+            }
+            
+            // Iniciar los heartbeats
+            console.log('Starting heartbeat system...');
+            setTimeout(sendHeartbeat, HEARTBEAT_INTERVAL);
+            
+            console.log('Worker is now running and ready to accept connections');
+        });
+        
+        // Manejar errores del servidor
+        server.on('error', (error) => {
+            if (error.code === 'EADDRINUSE') {
+                console.error(`Port ${PORT} is already in use. Please choose a different port.`);
+            } else {
+                console.error('Server error:', error);
+            }
+            process.exit(1);
+        });
+        
+    } catch (error) {
+        console.error('Fatal error starting worker:', error);
+        process.exit(1);
+    }
+}
+
+// Iniciar el worker
+startWorker().catch(error => {
+    console.error('Failed to start worker:', error);
+    process.exit(1);
+});
