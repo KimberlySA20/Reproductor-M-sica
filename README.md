@@ -30,14 +30,14 @@ MUSIC-STREAMER/
 - MongoDB (local o Docker)
 - Opcional: Docker & Docker Compose
 
-## 🛠️ Instalación y Desarrollo
+## Instalación y Desarrollo
 
 ### Opción 1: Desarrollo Local
 
 1. **Clonar el repositorio:**
    ```bash
-   git clone https://github.com/tu-usuario/music-streamer.git
-   cd music-streamer
+   git clone https://github.com/KimberlySA20/Reproductor-M-sica.git
+   cd Reproductor-M-sica
    ```
 
 2. **Instalar dependencias:**
@@ -130,13 +130,6 @@ docker-compose logs -f
 ### Variables de Entorno
 Ver los archivos `.env.example` en cada módulo para la configuración completa.
 
-## 🤝 Contribuir
-
-1. Fork del proyecto
-2. Crear feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit cambios (`git commit -m 'Add amazing feature'`)
-4. Push al branch (`git push origin feature/amazing-feature`)
-5. Abrir Pull Request
 
 ## 📝 Scripts Útiles
 
